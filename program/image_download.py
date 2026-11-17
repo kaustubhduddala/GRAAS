@@ -27,7 +27,7 @@ STRATEGIES = {
     "Automatic: plain request, then browser-like headers, then the browser": "auto",
     "Plain requests only (never open a browser)": "requests",
     "Always use the browser for sites that refuse access": "browser",
-    "Ask me: stop and open Site logins": "ask",
+    "Ask me: stop and open Settings > Image sites": "ask",
 }
 PREFS = {"strategy": "auto", "challenge_wait": 180, "browser_delay": 2.0, "request_delay": 0.0,
          "parallel_sites": 4}   # websites downloaded from at the same time (one image at a time from each)
@@ -47,7 +47,7 @@ class AccessDenied(Exception):
     def __init__(self, url, status=None, reason=""):
         self.url, self.status, self.host = url, status, host_of(url)
         why = f"HTTP {status}" if status else (reason or "blocked")
-        super().__init__(f"Access denied by {self.host} ({why}); sign in to this site from Images, Site logins")
+        super().__init__(f"Access denied by {self.host} ({why}); sign in to this site from Settings > Image sites")
 
 
 def host_of(url):
@@ -213,7 +213,7 @@ def fetch(url, stream=False, timeout=30, control=None, log=print):
     """GET `url`, escalating as far as the download preference allows:
     1. a plain request with any saved sign-in, retried once with browser-like headers;
     2. the same download through a visible browser, where a person can pass a check;
-    3. raise AccessDenied, which lists the site under Site logins for a sign-in or a manual download.
+    3. raise AccessDenied, which lists the site under Settings > Image sites for a sign-in or a manual download.
     Other statuses are returned for the caller to judge."""
     host = host_of(url)
     strategy = PREFS["strategy"]
@@ -1211,12 +1211,12 @@ def _download_media(csv_path, media_dir, log, control, progress, only_ids, force
     control.active.clear()
     for host, skipped_ids in summary["skipped_sites"].items():
         note_refused(host, "skipped by you")
-        log(f"{host} was skipped by you for {len(skipped_ids)} images. It is listed under Images, Site logins.")
+        log(f"{host} was skipped by you for {len(skipped_ids)} images. It is listed under Settings > Image sites.")
     for host, failing_ids in summary["failing"].items():
         note_refused(host, f"failed {FAILING_AFTER} times in a row")
-        log(f"{host} kept failing and was skipped ({len(failing_ids)} images). It is listed under Images, Site logins.")
+        log(f"{host} kept failing and was skipped ({len(failing_ids)} images). It is listed under Settings > Image sites.")
     for host, blocked_ids in summary["blocked"].items():
-        log(f"{host} refused access for {len(blocked_ids)} images. Use Images, Site logins to sign in, then retry.")
+        log(f"{host} refused access for {len(blocked_ids)} images. Use Settings > Image sites to sign in, then retry.")
     if summary["gbif_copies"]:
         log(f"{len(summary['gbif_copies'])} images came from GBIF's reduced copies because their own links did not "
             f"work (at most 1200 px tall).")

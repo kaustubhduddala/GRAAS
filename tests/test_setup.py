@@ -1,4 +1,4 @@
-"""Tests for measuring untouched sheets by hand, the label reader, Model setup and the downloader.
+"""Tests for measuring untouched sheets by hand, the label reader, Settings > Model add-ons and the downloader.
 
 Run with:  python -m unittest discover tests
 """

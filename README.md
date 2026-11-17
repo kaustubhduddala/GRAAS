@@ -44,7 +44,7 @@ pillow, keyring, playwright (browser sign-in), openai and anthropic
 (vision models), opencv-python-headless, scikit-image and scipy (image
 measurement) and tksheet (the Edit tab); the rest are their
 dependencies. The optional PyTorch and
-label-reader add-ons are in `requirements-models.txt` (see "Model setup"
+label-reader add-ons are in `requirements-models.txt` (see "Model add-ons"
 in section 5).
 
 ## 2. Installation
@@ -146,11 +146,26 @@ falls back to the command-line menu. To open the menu directly:
 python main.py --cli
 ```
 
-The menu bar has File (GBIF account, open the data folder or log,
-quit), View (theme, show log and keep awake) and Help (About, which also
-shows where your data is kept). View switches between the System, Light
-and Dark themes. Your theme, file paths and model settings are saved in
-`settings.json` and restored the next time you open the app.
+The menu bar has File (Settings, open the data folder or log, quit),
+View (show log, theme) and Help (About, which also shows where your data
+is kept).
+
+Every setting is in one window, **File > Settings…** (Ctrl+comma, or
+Cmd+comma on a Mac), with a tab for each part of the app:
+
+| Tab | What it holds |
+|---|---|
+| General | Theme, the log, keep the computer awake, the data folder, updates |
+| GBIF account | The account new GBIF downloads are requested with |
+| Image sites | How images are downloaded, sites that refused downloads, saved sign-ins |
+| Vision model | The provider's API key, server, model, token limit, thinking and image size |
+| Model add-ons | The optional PyTorch add-on, SAM 2, label reader and starting weights |
+| Training | Device, epochs, image size and batch for training your own models |
+
+Buttons around the app (Sign in…, Sites and sign-ins…, API key and
+options…, Model add-ons…) open the same window on the matching tab. Your
+settings are saved in `settings.json` and restored the next time you open
+the app.
 
 The window shows controls, not instructions. Wherever a label is followed
 by a small grey "?", rest the pointer on the label (or click the "?") to
@@ -271,8 +286,10 @@ measurable. Section 5 explains how. "Find with" chooses what does the
 finding: trained models when there are any, otherwise the vision model
 chosen under Provider. "Read labels" chooses what transcribes the label:
 the built-in OCR when it is installed, otherwise the vision model.
-"Model setup..." (also under File) installs and downloads everything
-optional; see "Model setup" in section 5.
+"Model add-ons..." (Settings > Model add-ons) installs and downloads
+everything optional; see "Model add-ons" in section 5. The provider's API
+key, server and options are under "API key and options..." (Settings >
+Vision model).
 
 Results go to a separate `measurements.csv`, one row per gbifID.
 "Choose images..." opens the checklist so you can measure specific
@@ -459,8 +476,8 @@ or sign-in page) the app works through these steps, as far as the
    refusals in a row the rest of that site's images are skipped for the
    run so the site is not hammered.
 
-When a run ends with refused sites, the **Site logins** window opens
-(also under Images, **Site logins…**). It lists every site that has ever
+When a run ends with refused sites, **Settings > Image sites** opens
+(also under Images, **Sites and sign-ins…**). It lists every site that has ever
 refused access, with the number of images waiting:
 
 - **Sign in…** opens the browser on the site so you can sign in or pass
@@ -538,7 +555,7 @@ Partly downloaded images are never left in the image folder.
 
 ### Keep computer awake
 
-The "Keep awake" box in the bottom bar (also View > Keep computer awake) stops the computer from
+"Keep the computer awake" (Settings > General) stops the computer from
 going to sleep while the app is open, which matters for long GBIF
 downloads and measurement runs. The screen may still turn off. The
 setting is remembered, and the computer can sleep normally again as
@@ -624,10 +641,10 @@ A vision-language model is good at reading labels and at yes/no
 questions, and poor at placing points precisely. It is the starting
 point; trained models take over as sheets are reviewed.
 
-### Model setup
+### Model add-ons
 
-File > Model setup... (or the button on the Measure tab) is one window for
-everything optional, like the site logins window. Each item shows whether
+Settings > Model add-ons (or the button on the Measure tab) is one tab for
+everything optional. Each item shows whether
 it is ready, how big it is, and an Install or Download button; "Get
 everything that is missing" does them all. Nothing is installed or
 downloaded until you press a button, downloads can be cancelled and
@@ -682,7 +699,7 @@ vision model at all.
 
 Small models fine-tuned on your own reviewed sheets find structures
 faster and far more consistently than a vision-language model. They need
-the add-on from Model setup. With it installed:
+the add-on from Settings > Model add-ons. With it installed:
 
 - SAM 2 outlines each object the detector points at, which gives the
   leaf and seed measurements a precise outline.
@@ -935,7 +952,7 @@ them in this list, so there are no circular imports.
 | `program/measure/locator.py` | Asks the vision model where things are, and yes/no check questions |
 | `program/measure/downloads.py` | Downloads and package installs with progress, retries, resume and cancel |
 | `program/measure/ocr.py` | The built-in label reader (RapidOCR) and the rules that pull fields out of label text |
-| `program/measure/model_setup.py` | The Model setup window |
+| `program/measure/model_setup.py` | Settings > Model add-ons |
 | `program/measure/trained.py` | The optional PyTorch add-on: trained YOLO seg/pose models, SAM 2, the model registry |
 | `program/measure/detectors.py` | One interface over the vision model and the trained models |
 | `program/measure/calibration.py` | Pixels per centimetre from the ruler, the sheet width or a reviewer |
@@ -956,6 +973,7 @@ them in this list, so there are no circular imports.
 | `program/modify_tab.py`, `program/analysis_tab.py` | The Modify and Analysis tabs |
 | `program/keep_awake.py` | Keeping the computer awake |
 | `program/app_window.py` | The graphical interface |
+| `program/settings_window.py` | File > Settings: one window with a tab per part of the app |
 | `program/command_line.py` | The command-line menu and commands |
 | `program/updater.py`, `program/update_dialog.py` | Update check, download, verification and install |
 | `main.py` | Entry point |

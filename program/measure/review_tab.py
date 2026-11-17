@@ -791,11 +791,11 @@ class ReviewTab(ttk.Frame):
         if self.sam is not None:
             return self.sam
         if not trained.available():
-            messagebox.showinfo("SAM 2", "The model add-on is not installed. Install it in Model setup first.",
+            messagebox.showinfo("SAM 2", "The model add-on is not installed. Install it in Settings > Model add-ons first.",
                                 parent=self.app.root)
             return None
         if trained.sam_weights() is None:
-            messagebox.showinfo("SAM 2", "The SAM 2 weights are not downloaded yet. Download them in Model setup "
+            messagebox.showinfo("SAM 2", "The SAM 2 weights are not downloaded yet. Download them in Settings > Model add-ons "
                                 "(about 160 MB), then try again.", parent=self.app.root)
             return None
         try:
@@ -1031,7 +1031,7 @@ class ReviewTab(ttk.Frame):
             return
         if not trained.available():
             if messagebox.askyesno("Model add-on needed", "Training needs the optional PyTorch add-on, which is not "
-                                   "installed. Open Model setup to install it?", parent=self.app.root):
+                                   "installed. Open Settings > Model add-ons to install it?", parent=self.app.root):
                 self.app.open_model_setup()
             return
         labelled = training.gather_labels()
@@ -1072,7 +1072,7 @@ class TrainDialog(tk.Toplevel):
         tip(ttk.Checkbutton(self, text="Outline model", variable=self.seg),
             "Finds the outlines (a segmentation model). It needs labels that have outlines, from SAM 2 or "
             "CVAT.").grid(row=2, column=0, columnspan=2, sticky="w")
-        saved = training.saved_settings()          # File > ML settings
+        saved = training.saved_settings()          # Settings > Training
         self.epochs = tk.StringVar(value=str(saved["epochs"]))
         self.imgsz = tk.StringVar(value=str(saved["imgsz"]))
         for row, (text, var, hint) in enumerate((

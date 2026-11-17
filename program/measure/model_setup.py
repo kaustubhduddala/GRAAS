@@ -1,8 +1,8 @@
-"""Model setup: everything the optional models need, in one window.
+"""Model add-ons: everything the optional models need, in one tab of the Settings window.
 
 The components are plain objects (what it is, how big it is, whether it is ready, how to get it) so the
-checks work without a window; ModelSetupDialog is the window on top of them, like the Site logins
-window. Nothing is installed or downloaded until a button is pressed.
+checks work without a window; ModelSetupPanel is the settings tab on top of them. Nothing is installed or
+downloaded until a button is pressed.
 """
 import importlib.metadata
 import shutil
@@ -14,8 +14,7 @@ from typing import Callable
 
 from config import ADDONS_DIR, BASE_DIR, FROZEN
 from . import downloads, ocr, trained
-from .detectors import DETECTOR_CHOICES, LABEL_CHOICES
-from ..gui_widgets import HelpTip, help_label, set_title_bar, style_text, tip
+from ..gui_widgets import HelpTip, help_label, style_text
 
 READY, MISSING, PARTIAL = "ready", "missing", "partial"
 LOW_DISK_GB = 6.0                # warn before the PyTorch add-on when less than this is free
@@ -122,61 +121,36 @@ def get_all(items, log=print, cancel=None, only=None):
     return outcome
 
 
-class ModelSetupDialog(tk.Toplevel):
-    """Install, download and choose what the models use."""
+class ModelSetupPanel(ttk.Frame):
+    """Settings > Model add-ons: install and download what the optional models need."""
 
-    def __init__(self, app):
-        super().__init__(app.root)
-        self.title("Model setup")
-        self.geometry("780x640")
-        self.minsize(640, 520)
-        self.transient(app.root)
-        self.configure(background=app.palette["bg"])
-        set_title_bar(self, app.theme_name == "dark")
+    def __init__(self, parent, app):
+        super().__init__(parent, padding=16)
         self.app, self.cancel, self.busy = app, threading.Event(), False
         self.rows = []
-
-        body = ttk.Frame(self, padding=14)
-        body.pack(fill="both", expand=True)
-        body.columnconfigure(0, weight=1)
-        body.rowconfigure(3, weight=1)
-        self.list_frame = ttk.Frame(body)
-        self.list_frame.grid(row=1, column=0, sticky="ew", pady=(0, 4))
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(1, weight=1)
+        self.list_frame = ttk.Frame(self)
+        self.list_frame.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         self.list_frame.columnconfigure(0, weight=1)
 
-        choices = ttk.LabelFrame(body, text="Choices")
-        choices.grid(row=2, column=0, sticky="ew", pady=(6, 8))
-        choices.columnconfigure(1, weight=1)
-        ttk.Label(choices, text="Find structures with").grid(row=0, column=0, sticky="w", padx=(0, 10), pady=2)
-        ttk.Combobox(choices, textvariable=app.detector_var, values=list(DETECTOR_CHOICES), state="readonly",
-                     width=42).grid(row=0, column=1, sticky="w", pady=2)
-        ttk.Label(choices, text="Read labels with").grid(row=1, column=0, sticky="w", padx=(0, 10), pady=2)
-        ttk.Combobox(choices, textvariable=app.label_var, values=list(LABEL_CHOICES), state="readonly",
-                     width=42).grid(row=1, column=1, sticky="w", pady=2)
-        flags = ttk.Frame(choices)
-        flags.grid(row=2, column=1, sticky="w")
-        tip(ttk.Checkbutton(flags, text="SAM 2 outlines", variable=app.refine_masks_var),
-            "Outline leaves and seeds precisely with SAM 2 (needs the add-on and the SAM 2 download).").pack(
-            side="left", padx=(0, 16))
-        tip(ttk.Checkbutton(flags, text="Second-opinion checks", variable=app.second_opinion_var),
-            "Ask the vision model yes or no questions about each measured object. Slower, but catches more "
-            "mistakes.").pack(side="left")
-
-        log_frame = ttk.Frame(body)
-        log_frame.grid(row=3, column=0, sticky="nsew")
-        self.log_box = tk.Text(log_frame, height=9, wrap="word", font=app.fonts["mono"], padx=8, pady=6,
+        log_frame = ttk.Frame(self)
+        log_frame.grid(row=1, column=0, sticky="nsew")
+        self.log_box = tk.Text(log_frame, height=7, wrap="word", font=app.fonts["mono"], padx=8, pady=6,
                                state="disabled")
         style_text(self.log_box, app.palette)
-        app.text_widgets.append(self.log_box)
+        app.text_widgets.append(self.log_box)       # recoloured with the theme while it exists
+        self.log_box.bind("<Destroy>", lambda _: self.log_box in app.text_widgets
+                          and app.text_widgets.remove(self.log_box))
         bar = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_box.yview)
         self.log_box.configure(yscrollcommand=bar.set)
         bar.pack(side="right", fill="y")
         self.log_box.pack(side="left", fill="both", expand=True)
 
-        self.disk = ttk.Label(body, style="Muted.TLabel", wraplength=740, justify="left")
-        self.disk.grid(row=4, column=0, sticky="w", pady=(6, 0))
-        footer = ttk.Frame(body)
-        footer.grid(row=5, column=0, sticky="ew", pady=(10, 0))
+        self.disk = ttk.Label(self, style="Muted.TLabel", wraplength=660, justify="left")
+        self.disk.grid(row=2, column=0, sticky="w", pady=(6, 0))
+        footer = ttk.Frame(self)
+        footer.grid(row=3, column=0, sticky="ew", pady=(10, 0))
         self.all_button = ttk.Button(footer, text="Get everything missing", style="Accent.TButton",
                                      command=self._get_all)
         self.all_button.pack(side="left")
@@ -184,17 +158,22 @@ class ModelSetupDialog(tk.Toplevel):
         self.cancel_button.pack(side="left", padx=6)
         HelpTip(footer, "Everything here is optional: the app measures with a vision model (such as LM Studio) "
                         "without any of it.\n\nThe add-on and your own trained models replace the vision model "
-                        "for finding structures, and the label reader replaces it for reading labels.\n\nNothing "
-                        "is installed or downloaded until you press a button.").pack(side="left", padx=(4, 0))
-        ttk.Button(footer, text="Close", command=self._close).pack(side="right")
-        self.protocol("WM_DELETE_WINDOW", self._close)
-        self.bind("<Escape>", lambda _: self._close())
+                        "for finding structures, and the label reader replaces it for reading labels. Which of "
+                        "them a run uses is chosen on the Measure tab.\n\nNothing is installed or downloaded "
+                        "until you press a button.").pack(side="left", padx=(4, 0))
         self._render()
-        try:
-            self.wait_visibility()
-            self.grab_set()
-        except tk.TclError:
-            pass
+
+    def refresh(self):
+        if not self.busy:
+            self._render()
+
+    def can_close(self):
+        """Asked by the Settings window before it closes: a running install is cancelled only if the person agrees."""
+        if self.busy and not messagebox.askyesno("Model add-ons", "A download or install is still running. Cancel "
+                                                 "it and close?", parent=self.winfo_toplevel()):
+            return False
+        self.cancel.set()
+        return True
 
     # ------------------------------------------------------------------ the list
 
@@ -251,7 +230,8 @@ class ModelSetupDialog(tk.Toplevel):
         if self.busy:
             return
         if self.app.running:
-            messagebox.showinfo("Model setup", "Wait for the task that is running to finish first.", parent=self)
+            messagebox.showinfo("Model add-ons", "Wait for the task that is running to finish first.",
+                                parent=self.winfo_toplevel())
             return
         self.cancel.clear()
         self._set_busy(True)
@@ -282,12 +262,3 @@ class ModelSetupDialog(tk.Toplevel):
     def _cancel(self):
         self.cancel.set()
         self._say("Cancelling...")
-
-    def _close(self):
-        if self.busy and not messagebox.askyesno("Model setup", "A download or install is still running. Cancel it "
-                                                 "and close?", parent=self):
-            return
-        self.cancel.set()
-        self.app._save_settings()
-        self.app.model_setup_changed()
-        self.destroy()

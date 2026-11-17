@@ -103,7 +103,7 @@ def recommend(device, memory_gb, train_images=None):
 
 
 def saved_settings():
-    """The ML settings saved from File > ML settings; anything missing is the default (batch None = by device)."""
+    """The ML settings saved from Settings > Training; anything missing is the default (batch None = by device)."""
     saved = load_settings().get("training")
     saved = saved if isinstance(saved, dict) else {}
     settings = {**DEFAULTS, "batch": None, "device": "auto"}      # no batch saved: train() picks one for the device
@@ -327,7 +327,7 @@ def train(task, labelled=None, base=None, epochs=None, imgsz=None, batch=None, l
     if task not in ("pose", "seg"):
         raise ValueError("Train 'pose' (landmarks) or 'seg' (outlines)")
     if not trained.available():
-        raise RuntimeError("The model add-on is not installed. Install it in File > Model setup, or run: python main.py models install")
+        raise RuntimeError("The model add-on is not installed. Install it in Settings > Model add-ons, or run: python main.py models install")
     dataset = build_dataset(task, labelled, groups=groups, log=log)
     from ultralytics import YOLO
 
@@ -339,7 +339,7 @@ def train(task, labelled=None, base=None, epochs=None, imgsz=None, batch=None, l
         if base:
             raise FileNotFoundError(f"The starting weights {base} do not exist")
         trained.fetch_asset(trained.BASE_WEIGHTS[task], log)       # about 45 MB, once
-    saved = saved_settings()          # File > ML settings; what the caller passes wins over it
+    saved = saved_settings()          # Settings > Training; what the caller passes wins over it
     device = trained.device(device or saved["device"])
     log(f"Training the {task} model from {start.name} on {device} "
         f"({dataset['counts']['train']['images']} training images). This takes a while.")

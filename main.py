@@ -21,7 +21,7 @@ USAGE = """Usage:
   python main.py export-mof [measurements_csv] [--output file.csv]
                                  write the measurements as Darwin Core MeasurementOrFact records
   python main.py models [status | install | download-sam | download-weights | install-ocr]
-                                 the optional models: PyTorch add-on, SAM 2, built-in label reader (also: File > Model setup)
+                                 the optional models: PyTorch add-on, SAM 2, built-in label reader (also: Settings > Model add-ons)
   python main.py labels export [--prelabels] [--output file.json] | import corrected_coco.json
                                  exchange labels with CVAT or Label Studio (COCO format)
   python main.py train [pose | seg | all] [--epochs N] [--imgsz N] [--batch N] [--base weights.pt]
@@ -71,7 +71,7 @@ def self_test():
                                      providers, records, taxa, trained, training)
         import bs4, cv2, keyring, numpy, openai, pandas, PIL.Image, pygbif, requests, skimage, tksheet  # noqa: F401
         import tkinter  # noqa: F401
-        import pip._internal.cli.main  # noqa: F401  (Model setup installs the add-ons with the bundled pip)
+        import pip._internal.cli.main  # noqa: F401  (Settings > Model add-ons installs the add-ons with the bundled pip)
         from program import browser_sign_in
         if not browser_sign_in.available():
             raise ImportError('playwright is not installed or was not bundled')
@@ -85,7 +85,7 @@ def self_test():
 
 
 def run_pip(pip_args):
-    """`Graas --pip install ...`: the packaged app has no Python to run `python -m pip` with, so Model setup runs
+    """`Graas --pip install ...`: the packaged app has no Python to run `python -m pip` with, so Settings > Model add-ons runs
     the app itself this way (see downloads.pip_command). Not listed in the usage: it is internal."""
     import os
 

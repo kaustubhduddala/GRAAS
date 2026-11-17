@@ -177,7 +177,7 @@ def status():
     lines = ["Model add-on (PyTorch, Ultralytics): " + ("installed" if available() else "not installed")]
     if available():
         lines.append("SAM 2 outlines: " + ("ready" if sam_weights() else
-                                           "weights not downloaded yet (Model setup, or python main.py models download-sam)"))
+                                           "weights not downloaded yet (Settings > Model add-ons, or python main.py models download-sam)"))
     registry = load_registry()
     for task, what in (("pose", "Landmark model"), ("seg", "Outline model")):
         path, version = current(task)
