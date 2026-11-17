@@ -14,10 +14,8 @@
   ],
   "issue_presets": {},
   "column_presets": {},
-  "workspace": "0011409-260928105237408_Megathyrsus_maximus",
-  "recent_csvs": [
-    "/Users/kaustubhduddala/Documents/GBIF Herbaria Pipeline/data/0011409-260928105237408_Megathyrsus_maximus/master_cleaned.csv"
-  ],
+  "workspace": "",
+  "recent_csvs": [],
   "provider": "lmstudio",
   "servers": {
     "lmstudio": "http://localhost:1234/v1"
