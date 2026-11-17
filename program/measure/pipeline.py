@@ -31,11 +31,11 @@ from .detectors import DetectorOptions, build_detector
 from .geometry import (WIDTH_PX_PER_CM, PlantImage, blade_checks, distance_to_edge, polygon_mask, principal_axis,
                        skeleton_path, spikelet_axis, widest_point)
 from .overlay import draw_overlay
-from .providers import ModelOutputError, ModelSettings, ProviderError
+from .providers import ModelOutputError, ModelSettings, ProviderError, ProviderUnavailable
 from .records import (export_measurement_or_fact, is_done, load_measurements, needs_review, now, result_row,
                       save_measurements, start_fresh)
 from .taxa import DEFAULT_PROFILE, LANDMARKS, TRAIT_LABELS, TRAITS, taxon_names
-from ..utils import ItemSkipped, index_images
+from ..utils import ItemSkipped, index_images, pause
 
 MIN_ON_PLANT = 0.8          # share of a traced path that must lie on plant pixels
 MAX_WINDING = 1.6           # path length over straight distance above which a panicle path "winds"
@@ -43,6 +43,8 @@ TIP_SLACK_CM = 1.0          # plant running on further than this beyond a tip me
 TIP_INSIDE_CM = 0.4         # a tip this far inside its own outline is not at the outline's end
 METHODS_AGREE = 0.2         # two widths/lengths further apart than this share disagree
 COPY_SPREAD = 0.03          # lengths this close together across 3+ marks mean the model copied one segment
+RETRY_WAITS_S = (20, 90, 300)   # pauses before trying a sheet again when the model provider does not answer
+STOP_AFTER_FAILURES = 8     # sheets failing one after another before a long run stops itself
 SPIKELET_ASPECT = (1.4, 5.0)
 
 
@@ -731,7 +733,12 @@ def save_result(gbif_id, image, result, raw, error, responses_dir):
         except Exception as exc:  # the overlay is for review only; never lose the result over it
             record["overlay_error"] = str(exc)
     path = response_path(responses_dir, gbif_id)
-    path.write_text(json.dumps(record, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+    temp = path.with_name(path.name + ".tmp")           # written whole, then swapped in: never half a record
+    try:
+        temp.write_text(json.dumps(record, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+        temp.replace(path)
+    finally:
+        temp.unlink(missing_ok=True)
     return path
 
 
@@ -761,7 +768,8 @@ def measure_images(media_dir, csv_path, log=print, control=None, progress=None, 
     images = index_images(media_dir)
     targets = [(gbif_id, path) for gbif_id, path in images.items() if only_ids is None or gbif_id in only_ids]
     summary = {"total": len(targets), "measured": 0, "skipped": 0, "skipped_by_user": 0, "failed": 0,
-               "cancelled": False, "needs_review": 0}
+               "cancelled": False, "needs_review": 0, "stopped": ""}
+    failures_in_a_row = 0
     if not images:
         log(f"No downloaded images found in {media_dir}. Download images first.")
         return summary
@@ -791,10 +799,24 @@ def measure_images(media_dir, csv_path, log=print, control=None, progress=None, 
         log(f"[{number}/{len(targets)}] Measuring {image.name}")
         started = datetime.now()
         try:
-            result, raw = measure_sheet(image, detector, profile, log=log, control=control, status=status)
+            for wait in (*RETRY_WAITS_S, None):
+                try:
+                    result, raw = measure_sheet(image, detector, profile, log=log, control=control, status=status)
+                    break
+                except ProviderUnavailable as exc:
+                    # A server restarting, a dropped connection or a rate limit should not end an overnight run:
+                    # wait and measure this sheet again. Only when it stays away does the run stop (below).
+                    if wait is None:
+                        raise
+                    log(f"    {exc}")
+                    log(f"    Waiting {wait} s, then trying this sheet again")
+                    if status:
+                        status(f"Waiting {wait} s for the model to answer again")
+                    pause(wait, control)
             save_result(gbif_id, image, result, raw, "", responses_dir)
             rows[gbif_id] = result_row(gbif_id, image.name, result)
             summary["measured"] += 1
+            failures_in_a_row = 0
             log(f"    Done in {(datetime.now() - started).seconds} s: "
                 + ", ".join(describe_decision(result["decisions"][trait]) for trait in TRAITS))
         except ItemSkipped:
@@ -804,7 +826,10 @@ def measure_images(media_dir, csv_path, log=print, control=None, progress=None, 
             log(f"    Skipped {image.name}")
             summary["skipped_by_user"] += 1
             continue
-        except ProviderError:
+        except ProviderError as exc:
+            if summary["measured"] or summary["skipped"]:
+                log(f"Stopped at {image.name}. Everything measured so far is saved; run Measure again to carry on "
+                    f"from here.")
             raise
         except Exception as exc:
             save_result(gbif_id, image, None, getattr(exc, "raw", {}) if isinstance(exc, ModelOutputError) else {},
@@ -812,15 +837,23 @@ def measure_images(media_dir, csv_path, log=print, control=None, progress=None, 
             rows[gbif_id] = {**(previous or {}), "gbifID": gbif_id, "ai_image": image.name, "ai_error": str(exc),
                              "ai_measured_at": now()}
             summary["failed"] += 1
+            failures_in_a_row += 1
             log(f"    Failed: {exc}")
         save_measurements(rows, csv_path)
+        if failures_in_a_row >= STOP_AFTER_FAILURES:
+            # One bad image fails alone. This many in a row is the setup (a model that cannot answer, a used-up
+            # quota), and going on would only write the same error on every remaining sheet.
+            summary["stopped"] = (f"{failures_in_a_row} sheets in a row failed, so the run was stopped. Check the "
+                                  f"last error, then run Measure again: failed sheets are tried again.")
+            log(summary["stopped"])
+            break
 
     summary["needs_review"] = sum(1 for gbif_id, _ in targets if needs_review(rows.get(gbif_id)))
     if summary["measured"] and csv_path.is_file():
         export_measurement_or_fact(csv_path, log=lambda _: None)
     if summary["cancelled"]:
         log("Measurement cancelled")
-    elif progress:
+    elif progress and not summary["stopped"]:
         progress(len(targets), len(targets))
     log(f"Measurement complete: {summary['measured']} measured, {summary['skipped']} already done, "
         f"{summary['skipped_by_user']} skipped by you, {summary['failed']} failed; {summary['needs_review']} of "

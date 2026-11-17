@@ -646,7 +646,10 @@ class SiteLoginDialog(tk.Toplevel):
                              "Method: what the app tries when a plain download is refused.\n\nWait: how long a "
                              "browser window stays open for you to pass a CAPTCHA or bot check before the app "
                              "moves on.\n\nDelay: the pause between downloads made through the browser, so the "
-                             "site is not flooded.")
+                             "site is not flooded.\n\nWebsites at once: images come from many websites; this "
+                             "many are downloaded from at the same time, one image at a time from each, so a "
+                             "slow site does not hold up the rest. Sites that need the browser take turns in "
+                             "one window.")
         prefs.grid(row=3, column=0, sticky="ew", pady=(10, 0))
         prefs.columnconfigure(1, weight=1)
         current = image_download.PREFS
@@ -654,6 +657,7 @@ class SiteLoginDialog(tk.Toplevel):
         self.strategy_var = tk.StringVar(value=labels.get(current["strategy"], next(iter(image_download.STRATEGIES))))
         self.wait_var = tk.StringVar(value=str(int(current["challenge_wait"] // 60)))
         self.delay_var = tk.StringVar(value=str(current["browser_delay"]))
+        self.sites_var = tk.StringVar(value=str(current["parallel_sites"]))
         ttk.Label(prefs, text="Method").grid(row=0, column=0, sticky="w", padx=(0, 8))
         box = ttk.Combobox(prefs, textvariable=self.strategy_var, values=list(image_download.STRATEGIES), state="readonly")
         box.grid(row=0, column=1, columnspan=3, sticky="ew", pady=2)
@@ -666,7 +670,10 @@ class SiteLoginDialog(tk.Toplevel):
         delay = ttk.Spinbox(prefs, textvariable=self.delay_var, from_=0, to=60, increment=0.5, width=5,
                             command=self._save_prefs)
         delay.grid(row=1, column=3, sticky="w")
-        for widget in (wait, delay):
+        ttk.Label(prefs, text="Websites at once").grid(row=2, column=0, sticky="w", padx=(0, 8))
+        sites = ttk.Spinbox(prefs, textvariable=self.sites_var, from_=1, to=8, width=5, command=self._save_prefs)
+        sites.grid(row=2, column=1, sticky="w", pady=(2, 0))
+        for widget in (wait, delay, sites):
             widget.bind("<FocusOut>", lambda _: self._save_prefs())
 
         self.status = ttk.Label(body, style="Muted.TLabel", wraplength=580, justify="left")
@@ -691,10 +698,11 @@ class SiteLoginDialog(tk.Toplevel):
         try:
             wait = max(int(float(self.wait_var.get())), 1) * 60
             delay = max(float(self.delay_var.get()), 0.0)
+            sites = min(max(int(float(self.sites_var.get())), 1), 8)
         except ValueError:
             return
         self.app._set_site_prefs({"strategy": image_download.STRATEGIES[self.strategy_var.get()],
-                                  "challenge_wait": wait, "browser_delay": delay})
+                                  "challenge_wait": wait, "browser_delay": delay, "parallel_sites": sites})
 
     def _say(self, text, kind="muted"):
         self.status.configure(text=text, foreground=self.app.palette[kind])
@@ -1264,9 +1272,7 @@ class PipelineApp:
         self.skip_btn = tip(ttk.Button(status, text="Skip", command=self._skip_menu, state="disabled"),
                             "Skip the item being worked on, or everything from its website")
         self.skip_btn.pack(side="right", padx=6)
-        self.skip_menu = tk.Menu(self.root, tearoff=False)
-        self.skip_menu.add_command(label="Skip this item", command=self._skip)
-        self.skip_menu.add_command(label="Skip this website", command=lambda: self._skip(site=True))
+        self.skip_menu = tk.Menu(self.root, tearoff=False)     # filled when it opens (_skip_menu)
         self.site_skip_ok = False
         self.cancel_confirm_job = None
         self.progress = ttk.Progressbar(status, length=220, mode="determinate")
@@ -1978,13 +1984,25 @@ class PipelineApp:
         threading.Thread(target=runner, daemon=True).start()
 
     def _skip_menu(self):
-        self.skip_menu.entryconfigure("Skip this website", state="normal" if self.site_skip_ok else "disabled")
+        # Images are downloaded from several websites at the same time, so the menu names the ones in progress.
+        active = sorted(self.control.active)
+        menu = self.skip_menu
+        menu.delete(0, "end")
+        menu.add_command(label=f"Skip the {len(active)} images downloading now" if len(active) > 1
+                         else "Skip this item", command=self._skip)
+        if len(active) > 1:
+            menu.add_separator()
+            for host in active:
+                menu.add_command(label=f"Skip website {host}", command=lambda h=host: self._skip(True, h))
+        else:
+            menu.add_command(label="Skip this website", state="normal" if self.site_skip_ok else "disabled",
+                             command=lambda: self._skip(True, active[0] if active else None))
         button = self.skip_btn
         self.skip_menu.tk_popup(button.winfo_rootx(), button.winfo_rooty() + button.winfo_height())
 
-    def _skip(self, site=False):
-        self.control.request_skip(site)
-        self.detail_var.set("Skipping this website…" if site else "Skipping…")
+    def _skip(self, site=False, host=None):
+        self.control.request_skip(site, host)
+        self.detail_var.set((f"Skipping {host}…" if host else "Skipping this website…") if site else "Skipping…")
 
     def _reset_cancel_button(self):
         if self.cancel_confirm_job:

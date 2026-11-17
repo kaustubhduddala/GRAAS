@@ -5,6 +5,8 @@ Follows the lab protocol: use a printed ruler when there is one, otherwise assum
 with a Fourier transform of the intensity along the ruler, which is precise to well under 1%; the
 hard part is finding the ruler, so a reading is only accepted when its millimetre and centimetre
 spacings agree with each other and with the sheet, or when an AI hint says where the ruler is.
+A short scale bar that marks whole centimetres (find_scale_bar) is read from the positions of its
+lines instead, and is accepted when it agrees with the sheet or shows millimetre ticks of its own.
 """
 import math
 from dataclasses import dataclass, field
@@ -278,6 +280,182 @@ def find_ruler(gray, prior):
     return None
 
 
+# --------------------------------------------------------------------------- short scale bars (no AI)
+
+BAR_SEARCH = 0.12           # a scale bar's centimetre pitch is looked for within this share of the sheet's scale
+BAR_MIN_LINES = 5           # centimetre lines in a row that must fit (a 4 cm span at least)
+BAR_MIN_ROWS = 3            # neighbouring image rows that must show the same lattice
+BAR_EDGE = 35.0             # grey-level step that counts as a line or a block edge of the bar
+BAR_MAX_COLOUR = 40.0       # mean saturation (0-255) above which the strip is a colour chart, not a scale bar
+
+
+def _lattice_fit(positions, strengths, pitch):
+    """Fit x = start + k * pitch to edge positions: dict(pitch, start, first, last, rms) or None.
+
+    The phase is where the edges agree best modulo the pitch. Edges away from the lattice are left out, more
+    strictly on each pass, and only the longest unbroken run of lattice lines is kept: a stray edge of a logo or
+    a label a few centimetres away can sit on the lattice by chance and would tilt the fit. The pitch is the
+    least-squares slope over that run.
+    """
+    if len(positions) < BAR_MIN_LINES:
+        return None
+    angle = 2 * np.pi * positions / pitch
+    start = (np.angle(np.sum(strengths * np.exp(1j * angle))) % (2 * np.pi)) * pitch / (2 * np.pi)
+    for tolerance in (0.08, 0.05, 0.03):
+        k = np.round((positions - start) / pitch)
+        keep = np.abs(positions - (start + k * pitch)) < max(tolerance * pitch, 2.5)
+        if len(np.unique(k[keep])) < BAR_MIN_LINES:
+            return None
+        first, last = _longest_run(k[keep])
+        keep &= (k >= first) & (k <= last)
+        if last - first + 1 < BAR_MIN_LINES:
+            return None
+        pitch, start = np.polyfit(k[keep], positions[keep], 1)
+    residual = positions[keep] - (start + k[keep] * pitch)
+    return {"pitch": float(pitch), "start": float(start), "first": int(first), "last": int(last),
+            "rms": float(np.sqrt(np.mean(residual ** 2)))}
+
+
+def _longest_run(ks):
+    """(first, last) of the longest run of consecutive integers in ks."""
+    ks = sorted(set(int(k) for k in ks))
+    best = run = (ks[0], ks[0])
+    for k in ks[1:]:
+        run = (run[0], k) if k == run[1] + 1 else (k, k)
+        if run[1] - run[0] > best[1] - best[0]:
+            best = run
+    return best
+
+
+def _row_lattice(profile, prior):
+    """The centimetre lattice of strong edges along one image row, or None: dict(pitch, x0, x1, lines).
+
+    A scale bar is drawn in lines and blocks a whole number of centimetres apart, so the positions of its strong
+    edges lie on a lattice whose pitch is the scale. Edges are located to a fraction of a pixel, which makes the
+    pitch far more exact than the spectrum of so short an object could be.
+    """
+    smooth = np.convolve(profile, np.ones(3) / 3, mode="same")
+    step = np.abs(smooth[2:] - smooth[:-2])                           # centred difference, at index i + 1
+    peaks = np.where((step[1:-1] >= step[:-2]) & (step[1:-1] > step[2:]) & (step[1:-1] > BAR_EDGE))[0] + 1
+    if len(peaks) < BAR_MIN_LINES:
+        return None
+    y0, y1, y2 = step[peaks - 1], step[peaks], step[peaks + 1]
+    denom = y0 - 2 * y1 + y2
+    positions = peaks + 1 + np.where(denom != 0, 0.5 * (y0 - y2) / np.where(denom != 0, denom, 1), 0.0)
+    strengths = step[peaks]
+    # A printed line a few pixels wide gives an edge on each side: join the two into the line's centre. (Where a
+    # white block starts at the line only one edge shows, half a line width off; the fit's tolerance covers that.)
+    joined, weights = [positions[0] * strengths[0]], [strengths[0]]
+    last = positions[0]
+    for position, strength in zip(positions[1:], strengths[1:]):
+        if position - last < max(0.05 * prior, 5.5):          # a line's two edges; never less than their blur
+            joined[-1] += position * strength
+            weights[-1] += strength
+        else:
+            joined.append(position * strength)
+            weights.append(strength)
+        last = position
+    strengths = np.array(weights)
+    positions = np.array(joined) / strengths
+    if len(positions) < BAR_MIN_LINES:
+        return None
+    best = None
+    # Candidate pitches come from the gaps between edges themselves (a gap is 1, 2, 3 ... pitches long).
+    gaps = (positions[None, :] - positions[:, None]).ravel()
+    lo, hi = prior * (1 - BAR_SEARCH), prior * (1 + BAR_SEARCH)
+    candidates = np.concatenate([gaps[(gaps / n > lo) & (gaps / n < hi)] / n for n in (1, 2, 3, 4, 5)])
+    if not len(candidates):
+        return None
+    counts, edges = np.histogram(candidates, bins=max(8, int((hi - lo) / (0.01 * prior))), range=(lo, hi))
+    counts = counts + np.append(counts[1:], 0) + np.append(0, counts[:-1])      # a pitch on a bin border counts once
+    for index in np.argsort(counts)[::-1][:4]:
+        if counts[index] < BAR_MIN_LINES - 1:
+            break
+        fit = _lattice_fit(positions, strengths, (edges[index] + edges[index + 1]) / 2)
+        if fit is None or not lo < fit["pitch"] < hi or fit["rms"] > 0.02 * fit["pitch"]:
+            continue
+        lines = fit["last"] - fit["first"] + 1
+        if best is None or lines > best["lines"]:
+            best = {"pitch": fit["pitch"], "x0": fit["start"] + fit["first"] * fit["pitch"],
+                    "x1": fit["start"] + fit["last"] * fit["pitch"], "lines": lines}
+    return best
+
+
+def _bar_ticks(profile, pitch):
+    """True when some centimetre of the profile shows ten evenly spaced millimetre ticks (most bars have one)."""
+    if pitch / 10 < 3:
+        return False
+    cell = int(pitch)
+    for s in range(0, max(1, len(profile) - cell), max(1, cell // 4)):
+        freqs, power, nfft = _spectrum(np.diff(profile[s:s + cell]))
+        period, prominence = _peak(freqs, power, nfft, pitch / 10 * 0.94, pitch / 10 * 1.06, context=2.5)
+        if period and prominence > 12:
+            return True
+    return False
+
+
+def find_scale_bar(rgb, gray, prior):
+    """A short printed scale bar (a few centimetres of lines or chequered blocks) near an edge of the image.
+
+    find_ruler needs millimetre ticks along the whole ruler, which the 5 or 10 cm bars many herbaria photograph
+    beside the sheet do not have: they mark whole centimetres, with millimetres in one of them at most. Such a bar
+    is found here as a lattice of strong edges one centimetre apart that (1) repeats over several neighbouring
+    rows, (2) is black and white, unlike a colour chart, and (3) has a pitch near the sheet's own scale.
+    Returns dict(px_per_cm, line, span_cm, confirmed, reading, ticks) or None.
+    """
+    import cv2
+
+    saturation = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)[..., 1]
+    found = []
+    half = max(1, int(prior / 60))
+    for edge in ("top", "bottom", "left", "right"):
+        img = (gray if edge in ("top", "bottom") else gray.T).astype(np.float32)
+        sat = saturation if edge in ("top", "bottom") else saturation.T
+        n_lines = img.shape[0]
+        band = int(0.16 * n_lines)
+        step = max(2, int(prior / 25))
+        lines = list(range(half, band, step) if edge in ("top", "left") else range(n_lines - band, n_lines - half, step))
+        rows = []
+        for line in lines:
+            profile = img[line - half:line + half + 1].mean(axis=0)
+            if np.percentile(profile, 98) - np.percentile(profile, 2) < 2 * BAR_EDGE:
+                continue                                              # a flat row: background or plain paper
+            fit = _row_lattice(profile, prior)
+            if fit is None:
+                continue
+            a, b = int(max(0, fit["x0"])), int(min(len(profile), fit["x1"] + 1))
+            if sat[line - half:line + half + 1, a:b].mean() > BAR_MAX_COLOUR:
+                continue
+            rows.append({**fit, "line": line, "profile": profile[a:b]})
+        # The same bar seen in neighbouring rows: group rows whose spans overlap and whose pitches agree.
+        rows.sort(key=lambda r: r["line"])
+        groups = []
+        for row in rows:
+            for group in groups:
+                last = group[-1]
+                if (row["line"] - last["line"] <= 3 * step and abs(row["pitch"] / last["pitch"] - 1) < 0.02
+                        and min(row["x1"], last["x1"]) - max(row["x0"], last["x0"]) > 2 * row["pitch"]):
+                    group.append(row)
+                    break
+            else:
+                groups.append([row])
+        for group in groups:
+            if len(group) < BAR_MIN_ROWS:
+                continue
+            pitch = float(np.median([r["pitch"] for r in group]))
+            longest = max(group, key=lambda r: r["lines"])
+            middle = group[len(group) // 2]
+            ticks = any(_bar_ticks(r["profile"], pitch) for r in group)
+            cand = {"edge": edge, "line": middle["line"], "start": longest["x0"], "end": longest["x1"]}
+            found.append({"px_per_cm": pitch, "line": _ruler_line(cand, pitch), "span_cm": float(longest["lines"] - 1),
+                          "confirmed": True, "reading": "scale bar", "ticks": ticks, "rows": len(group),
+                          "spread": float(np.std([r["pitch"] for r in group]) / pitch)})
+    if not found:
+        return None
+    # Millimetre ticks settle it; otherwise the bar seen in the most rows wins.
+    return max(found, key=lambda f: (f["ticks"], f["rows"]))
+
+
 # --------------------------------------------------------------------------- ruler from an AI hint
 
 def ruler_from_hint(gray, box, rough_px_per_cm):
@@ -359,6 +537,7 @@ def calibrate(rgb, ruler_hint=None, sheet_hint=None):
                              f"from the sheet width)")
                 hinted = None
     found = find_ruler(gray, prior)
+    clear = False
     if found:
         ratio = found["px_per_cm"] / sheet_px if sheet_px else 1.0
         agrees = bool(sheet_px) and abs(ratio - 1) <= RULER_AGREEMENT
@@ -369,7 +548,29 @@ def calibrate(rgb, ruler_hint=None, sheet_hint=None):
                 flags.append(f"ruler-like pattern ignored ({found['px_per_cm']:.1f} px/cm, "
                              f"{found['span_cm']:.0f} cm long, does not match the sheet)")
             found = None
-    ruler = hinted or found
+    bar = None
+    if not hinted and not (found and clear):
+        # No long, clear ruler: look for a short scale bar. The sheet's own scale says where to look; the image
+        # height is a second guess, for sheets whose paper could not be outlined (a plant covering most of it).
+        guess = max(rgb.shape[:2]) / SHEET_HEIGHT_CM
+        bars = [find_scale_bar(rgb, gray, near)
+                for near in [prior] + ([guess] if abs(guess / prior - 1) > BAR_SEARCH / 2 else [])]
+        bar = max((b for b in bars if b), key=lambda b: (b["ticks"], b["rows"]), default=None)
+        if bar and sheet_px and abs(bar["px_per_cm"] / sheet_px - 1) > BAR_SEARCH and not bar["ticks"]:
+            flags.append(f"scale-bar-like pattern ignored ({bar['px_per_cm']:.1f} px/cm, does not match the sheet)")
+            bar = None
+        if bar and found and abs(bar["px_per_cm"] / found["px_per_cm"] - 1) > 0.02:
+            # Two readings. A bar with its own millimetre ticks beats a ruler-like pattern that was only believed
+            # because it matched the sheet width (printed label text can pass for one); otherwise the ruler stays.
+            if bar["ticks"]:
+                flags.append(f"ruler-like pattern ignored ({found['px_per_cm']:.1f} px/cm; the scale bar reads "
+                             f"{bar['px_per_cm']:.1f})")
+                found = None
+            else:
+                bar = None
+        if bar:
+            flags[:] = [f for f in flags if not f.endswith("does not match the sheet)")]
+    ruler = hinted or found or bar
     if hinted and found and abs(hinted["px_per_cm"] / found["px_per_cm"] - 1) > RULER_AGREEMENT and sheet_px:
         # The AI's tick numbers are often misread, which locks the hinted reading onto a wrong period;
         # keep whichever reading is closer to the sheet width.
