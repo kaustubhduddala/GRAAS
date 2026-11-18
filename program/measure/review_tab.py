@@ -1043,10 +1043,12 @@ class ReviewTab(ttk.Frame):
 
         def work():
             for task in tasks:
-                training.train(task, labelled, epochs=epochs, imgsz=imgsz, log=self.app._log)
+                if training.train(task, labelled, epochs=epochs, imgsz=imgsz, log=self.app._log,
+                                  progress=self.app._progress, cancel=lambda: self.app.control.cancelled) is None:
+                    return "Cancelled"
             return "Training complete"
 
-        self.app._start(self.status, "Training…", work)
+        self.app._start(self.status, "Training…", work, cancellable=True)
 
 
 class TrainDialog(tk.Toplevel):

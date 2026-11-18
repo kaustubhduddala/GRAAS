@@ -35,7 +35,8 @@ import config
 from config import load_settings
 from . import trained
 from .labels import LABELS_DIR_NAME, load_labels
-from .trained import CLASSES, KEYPOINT_NAMES, MODELS_DIR, POSE_CLASSES, TILE
+from .trained import (CLASSES, FLIP_IDX, KEYPOINT_NAMES, KEYPOINT_SLOTS, MODELS_DIR, POSE_CLASSES, POSE_KEYPOINTS,
+                      SEED_PX_PER_CM, TILE, seed_scale)
 from ..utils import index_images
 
 DATASETS_DIR = MODELS_DIR / "datasets"
@@ -178,30 +179,46 @@ def _norm(value, size):
     return min(max(value / size, 0.0), 1.0)
 
 
-def pose_line(obj, size, offset=(0, 0)):
-    """One YOLO pose label line: class, box centre and size, then x y visibility for both landmarks."""
-    names = KEYPOINT_NAMES[obj["cls"]]
+def landmarks_in_order(obj):
+    """The object's two landmarks as the pose model learns them. A base and a tip are what they are; a leaf's two
+    margins are interchangeable, so the left one always comes first (FLIP_IDX keeps that true when an image is
+    mirrored in training, which would otherwise teach the model two answers for the same leaf)."""
+    first, second = (obj["keypoints"][name] for name in KEYPOINT_NAMES[obj["cls"]])
+    if obj["cls"] == "leaf" and (second[0], second[1]) < (first[0], first[1]):
+        first, second = second, first
+    return first, second
+
+
+def pose_line(obj, size, offset=(0, 0), scale=1.0):
+    """One YOLO pose label line: class, box centre and size, then x y visibility for the four keypoints (the class's
+    own two in its slots, trained.KEYPOINT_SLOTS; the other two unused). Positions are full-sheet pixels, moved by
+    `offset` (a tile's corner, at the tile's scale) after resizing by `scale`."""
     w, h = size
-    x0, y0, x1, y1 = [obj["box"][0] - offset[0], obj["box"][1] - offset[1], obj["box"][2] - offset[0],
-                      obj["box"][3] - offset[1]]
+
+    def local(x, y):
+        return x * scale - offset[0], y * scale - offset[1]
+
+    (x0, y0), (x1, y1) = local(*obj["box"][:2]), local(*obj["box"][2:])
     x0, y0, x1, y1 = max(0, x0), max(0, y0), min(w, x1), min(h, y1)
     parts = [POSE_CLASSES.index(obj["cls"]), _norm((x0 + x1) / 2, w), _norm((y0 + y1) / 2, h),
              _norm(x1 - x0, w), _norm(y1 - y0, h)]
-    for name in names:
-        x, y = obj["keypoints"][name][0] - offset[0], obj["keypoints"][name][1] - offset[1]
-        inside = 0 <= x <= w and 0 <= y <= h
-        parts += [_norm(x, w), _norm(y, h), 2 if inside else 0]
+    points = [(0.0, 0.0, 0)] * POSE_KEYPOINTS
+    for slot, point in zip(KEYPOINT_SLOTS[obj["cls"]], landmarks_in_order(obj)):
+        x, y = local(*point[:2])
+        points[slot] = (x, y, 2 if 0 <= x <= w and 0 <= y <= h else 0)
+    for x, y, visible in points:
+        parts += [_norm(x, w) if visible else 0.0, _norm(y, h) if visible else 0.0, visible]
     return " ".join(str(p) if isinstance(p, int) else f"{p:.6f}" for p in parts)
 
 
-def seg_line(obj, size, offset=(0, 0)):
+def seg_line(obj, size, offset=(0, 0), scale=1.0):
     """One YOLO seg label line: class, then the outline's points. A box stands in when there is no outline."""
     w, h = size
     polygon = obj.get("polygon")
     if not polygon or len(polygon) < 3:
         x0, y0, x1, y1 = obj["box"]
         polygon = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
-    points = [f"{_norm(x - offset[0], w):.6f} {_norm(y - offset[1], h):.6f}" for x, y in polygon]
+    points = [f"{_norm(x * scale - offset[0], w):.6f} {_norm(y * scale - offset[1], h):.6f}" for x, y in polygon]
     return f"{CLASSES.index(obj['cls'])} " + " ".join(points)
 
 
@@ -214,6 +231,17 @@ def usable(obj, task):
         return bool(names) and all((obj.get("keypoints") or {}).get(n) for n in names)
     # seg: a real outline, or a box for the rectangular things (labels, rulers, envelopes, charts)
     return obj["cls"] in CLASSES and (bool(obj.get("polygon")) or obj["cls"] not in POSE_CLASSES)
+
+
+def scaled(obj, factor):
+    """A copy of a labelled object with its box, landmarks and outline in an image resized by `factor`."""
+    out = dict(obj)
+    out["box"] = [v * factor for v in obj["box"]]
+    if obj.get("keypoints"):
+        out["keypoints"] = {k: [p[0] * factor, p[1] * factor] for k, p in obj["keypoints"].items()}
+    if obj.get("polygon"):
+        out["polygon"] = [[x * factor, y * factor] for x, y in obj["polygon"]]
+    return out
 
 
 def seed_tiles(seeds, size, tile=TILE):
@@ -283,8 +311,15 @@ def build_dataset(task, labelled=None, out_dir=None, groups=None, log=print):
             counts[split]["objects"] += len(whole)
         seeds = [o for o in objects if o["cls"] == "seed"]
         if seeds:
+            # Tiles at one scale (SEED_PX_PER_CM), so a spikelet is about the same number of pixels on every
+            # sheet; trained.TrainedModels.seeds looks for them at the same scale.
+            factor = seed_scale(label.get("px_per_cm"))
             rgb = np.asarray(image)
-            for n, (box, inside) in enumerate(seed_tiles(seeds, size), start=1):
+            if factor != 1.0:
+                rgb = np.asarray(image.resize((max(1, round(size[0] * factor)), max(1, round(size[1] * factor))),
+                                              Image.LANCZOS))
+                seeds = [scaled(o, factor) for o in seeds]
+            for n, (box, inside) in enumerate(seed_tiles(seeds, (rgb.shape[1], rgb.shape[0])), start=1):
                 tile = painted_tile(rgb, box, inside)
                 tile_size = (box[2] - box[0], box[3] - box[1])
                 Image.fromarray(tile).save(image_dir / f"{gbif_id}_seeds{n}.jpg", "JPEG", quality=95)
@@ -296,7 +331,7 @@ def build_dataset(task, labelled=None, out_dir=None, groups=None, log=print):
     lines = [f"path: {out_dir}", "train: images/train", "val: images/val", "test: images/test", "names:"]
     lines += [f"  {n}: {name}" for n, name in enumerate(names)]
     if task == "pose":
-        lines += ["kpt_shape: [2, 3]", "flip_idx: [0, 1]"]
+        lines += [f"kpt_shape: [{POSE_KEYPOINTS}, 3]", f"flip_idx: {FLIP_IDX}"]
     yaml_path = out_dir / "data.yaml"
     yaml_path.write_text("\n".join(lines) + "\n")
     (out_dir / "splits.json").write_text(json.dumps(splits, indent=2))
@@ -317,12 +352,50 @@ def latest_splits():
     return {}
 
 
+LOG_EVERY_EPOCHS = 10
+
+
+def _watch(model, epochs, log, progress, cancel):
+    """Callbacks on the training run: progress after every epoch, a line in the log every LOG_EVERY_EPOCHS, and a
+    stop between two batches as soon as `cancel()` is true. Returns a dict that says whether it was stopped."""
+    state = {"cancelled": False}
+
+    def batch_end(trainer):
+        if cancel and cancel():
+            state["cancelled"] = True
+            trainer.stop = True                 # the trainer checks this after every batch
+
+    def epoch_end(trainer):
+        total = trainer.epochs or epochs
+        done = min(trainer.epoch + 1, total)        # the final check of best.pt reports one epoch more
+        if done in state.setdefault("reported", set()):
+            return
+        state["reported"].add(done)
+        if progress:
+            progress(done, total)
+        if done == 1 or done % LOG_EVERY_EPOCHS == 0 or done == total:
+            scores = {k.split("/")[-1]: v for k, v in (trainer.metrics or {}).items()
+                      if k.startswith("metrics/mAP50(") and isinstance(v, (int, float))}
+            log(f"    epoch {done}/{total}" + "".join(f", {k} {v:.3f}" for k, v in scores.items()))
+
+    model.add_callback("on_train_batch_end", batch_end)
+    model.add_callback("on_fit_epoch_end", epoch_end)
+    return state
+
+
+def _keypoints_of(entry):
+    """How many keypoints a registered pose model predicts (2 for models from before the leaf had its own pair)."""
+    return int((entry or {}).get("keypoints") or 2)
+
+
 def train(task, labelled=None, base=None, epochs=None, imgsz=None, batch=None, log=print, groups=None,
-          device=None):
+          device=None, progress=None, cancel=None):
     """Fine-tune a pretrained YOLO model on the labels and make it the current model for `task`.
 
     Starts from pretrained weights (never from scratch), with augmentations that mimic old scans:
-    rotation, brightness, scale. Returns the registry entry.
+    rotation, brightness, scale. `progress(done, total)` is told the epochs; `cancel()` returning true
+    stops the run between two batches, and nothing is registered. Returns the registry entry, or None
+    when cancelled.
     """
     if task not in ("pose", "seg"):
         raise ValueError("Train 'pose' (landmarks) or 'seg' (outlines)")
@@ -334,6 +407,8 @@ def train(task, labelled=None, base=None, epochs=None, imgsz=None, batch=None, l
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     version = datetime.now().strftime("%Y%m%d-%H%M%S")
     previous, _ = trained.current(task)
+    if task == "pose" and previous and _keypoints_of(trained.load_registry().get("pose")) != POSE_KEYPOINTS:
+        previous = None                 # trained on the old two-keypoint layout: start again from the pretrained model
     start = Path(base) if base else (previous or MODELS_DIR / trained.BASE_WEIGHTS[task])
     if not start.is_file():
         if base:
@@ -346,13 +421,20 @@ def train(task, labelled=None, base=None, epochs=None, imgsz=None, batch=None, l
     size = int(imgsz or saved["imgsz"])
     epochs = int(epochs or saved["epochs"])
     per_step = int(batch or saved["batch"] or DEVICE_BATCH.get(device, DEFAULTS["batch"]))
+    # The packaged app cannot start the extra data-loading processes the way a Python install does; load in the
+    # training thread there.
+    workers = 0 if config.FROZEN else min(8, os.cpu_count() or 1)
     while True:
         model = YOLO(str(start))
+        watch = _watch(model, epochs, log, progress, cancel)
         try:
+            # No upside-down flips for the landmark model: FLIP_IDX swaps the leaf margins on every flip, which is
+            # right for a mirror image and wrong for an upside-down one.
             results = model.train(
-                data=str(dataset["yaml"]), imgsz=size, epochs=epochs, batch=per_step,
+                data=str(dataset["yaml"]), imgsz=size, epochs=epochs, batch=per_step, workers=workers,
                 device=device, project=str(MODELS_DIR / task), name=version, exist_ok=True, plots=False,
-                verbose=False, degrees=20.0, scale=0.4, hsv_v=0.3, hsv_s=0.4, fliplr=0.5, flipud=0.1, mosaic=0.3)
+                verbose=False, degrees=20.0, scale=0.4, hsv_v=0.3, hsv_s=0.4, fliplr=0.5,
+                flipud=0.0 if task == "pose" else 0.1, mosaic=0.3)
             break
         except Exception as exc:
             if not is_out_of_memory(exc):
@@ -367,6 +449,9 @@ def train(task, labelled=None, base=None, epochs=None, imgsz=None, batch=None, l
                 raise RuntimeError("Training ran out of memory even at batch 1 and image size "
                                    f"{MIN_IMGSZ}. Close other apps, or train on a computer with more memory.") from exc
             log(f"Out of memory on {device}; trying again with batch {per_step} and image size {size}.")
+    if watch["cancelled"]:
+        log(f"Training the {task} model was stopped; the model in use is unchanged.")
+        return None
     save_dir = Path(getattr(results, "save_dir", MODELS_DIR / task / version))
     weights = save_dir / "weights" / "best.pt"
     if not weights.is_file():
@@ -375,7 +460,8 @@ def train(task, labelled=None, base=None, epochs=None, imgsz=None, batch=None, l
                if isinstance(v, (int, float))}
     entry = trained.register(task, weights, version=version, base=start.name, metrics=metrics,
                              train_images=dataset["counts"]["train"]["images"], dataset=str(dataset["dir"]),
-                             classes=POSE_CLASSES if task == "pose" else CLASSES)
+                             classes=POSE_CLASSES if task == "pose" else CLASSES, seed_px_per_cm=SEED_PX_PER_CM,
+                             **({"keypoints": POSE_KEYPOINTS} if task == "pose" else {}))
     log(f"Training complete: {task} model version {version} is now in use. "
         + ("Key scores: " + ", ".join(f"{k.split('/')[-1]} {v}" for k, v in list(metrics.items())[:4]) if metrics else ""))
     return entry

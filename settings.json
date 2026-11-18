@@ -14,8 +14,10 @@
   ],
   "issue_presets": {},
   "column_presets": {},
-  "workspace": "",
-  "recent_csvs": [],
+  "workspace": "0011409-260928105237408_Megathyrsus_maximus",
+  "recent_csvs": [
+    "/Users/kaustubhduddala/Documents/GBIF Herbaria Pipeline/data/0011409-260928105237408_Megathyrsus_maximus/master_cleaned.csv"
+  ],
   "provider": "lmstudio",
   "servers": {
     "lmstudio": "http://localhost:1234/v1"
@@ -38,8 +40,15 @@
   "data_dir": "/Users/kaustubhduddala/Documents/GBIF Herbaria Pipeline/data",
   "training": {
     "device": "auto",
-    "epochs": 300,
+    "epochs": 150,
     "imgsz": 1280,
     "batch": 2
-  }
+  },
+  "site_prefs": {
+    "strategy": "auto",
+    "challenge_wait": 180,
+    "browser_delay": 2.0,
+    "parallel_sites": 4
+  },
+  "settings_tab": "addons"
 }

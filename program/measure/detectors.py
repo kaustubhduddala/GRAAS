@@ -174,7 +174,7 @@ class Detector:
                 box = entry.get("box") or _box_around(points, 0, image.size)
                 margin = CROP_MARGIN * max(box[2] - box[0], box[3] - box[1], px_per_cm)
                 regions.append(_box_around([box[:2], box[2:]], margin, image.size))
-            found = sorted(self.models.seeds(rgb, regions), key=lambda o: -o["score"])[:12]
+            found = sorted(self.models.seeds(rgb, regions, px_per_cm), key=lambda o: -o["score"])[:12]
             return found, {"source": "trained", "found": len(found), "regions": regions}
         best = max(panicles, key=lambda e: e.get("quality", 0))
         # Look where the spikelets are: on the traced panicle, a little above its middle. (The point

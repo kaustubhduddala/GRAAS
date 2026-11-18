@@ -14,7 +14,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from program.measure import decision, geometry, labels, occlusion, records, training
+from program.measure import decision, geometry, labels, occlusion, records, trained, training
 from program.measure.benchmark import load_reference, score
 from program.measure.calibration import manual_calibration
 from program.measure.pipeline import load_result, measure_images, measure_sheet, remeasure
@@ -311,9 +311,10 @@ class Workflow(unittest.TestCase):
                     values = [float(v) for v in line.split()]
                     self.assertTrue(all(0.0 <= v <= 1.0 for v in values[1:] if v != 2.0), line)
                     if task == "pose":
-                        self.assertEqual(len(values), 11)
+                        self.assertEqual(len(values), 5 + 3 * trained.POSE_KEYPOINTS)
         pose_yaml = (self.root / "dataset_pose" / "data.yaml").read_text()
-        self.assertIn("kpt_shape: [2, 3]", pose_yaml)
+        self.assertIn(f"kpt_shape: [{trained.POSE_KEYPOINTS}, 3]", pose_yaml)
+        self.assertIn(f"flip_idx: {trained.FLIP_IDX}", pose_yaml)
         self.assertEqual(training.split_of("123"), training.split_of("123"))
 
     def test_7_benchmark_scores_values_and_flags(self):

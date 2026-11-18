@@ -708,12 +708,19 @@ the add-on from Settings > Model add-ons. With it installed:
   tip, leaf margins, seed ends. At least 10 reviewed sheets are needed;
   100 to 200 that include the hard cases is a sensible first target.
   Sheets are split 70/15/15 into training, validation and test by
-  specimen.
+  specimen. The progress bar counts the epochs, and Cancel stops a run
+  without replacing the model in use.
 - `python main.py train seg` trains an outline model (panicle, leaf,
   seed, label, ruler, envelope, colour chart). It needs labels with
   outlines, which come from SAM 2 or from labels drawn in CVAT.
-- Seeds are trained and found on full-resolution tiles, because on a
-  downsized sheet they are only a few pixels long.
+- Seeds are trained and found on tiles resampled to 80 px/cm, because on
+  a downsized sheet they are only a few pixels long, and at one scale a
+  spikelet is the same size on every herbarium's images.
+- Training mirrors sheets left to right. A base and a tip keep their
+  names in a mirror image, but a leaf's two margins swap sides, so the
+  leaf margins have their own pair of landmarks (the left margin first).
+  A landmark model trained before this change still works for measuring,
+  and the next training run starts again from the pretrained weights.
 
 Trained models live in `models/` with a `registry.json`; the version
 used is saved with every measurement in `ai_detector`. After training,

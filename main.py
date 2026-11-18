@@ -156,4 +156,7 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    import multiprocessing
+
+    multiprocessing.freeze_support()    # a packaged app's helper processes (PyTorch's data loaders) start here
     main()
