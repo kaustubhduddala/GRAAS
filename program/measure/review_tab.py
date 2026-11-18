@@ -31,7 +31,8 @@ ZOOM_STEP = 1.25
 JSON_TYPES = [("COCO JSON", "*.json"), ("All files", "*.*")]
 SHEET_HELP = ("Drag a point to correct a measurement.\n\nDrag along a panicle line to pull out a new point; "
               "double-click a point to remove it.\n\nScroll to zoom, drag the sheet to move it, double-click to "
-              "fit it in the window.\n\nDelete removes the selected measurement. Esc stops a tool.")
+              "fit it in the window.\n\nDelete removes the selected measurement. Esc stops a tool.\n\nUndo and Redo (Ctrl/Cmd+Z, "
+              "Ctrl/Cmd+Shift+Z) step through the edits made to this sheet.")
 SELECTED_HELP = ("Click a measurement on the sheet or in the list to select it.\n\nFolded or overlapped: it cannot "
                  "be measured, so its value becomes NA.\nAn end is hidden: the value is only a minimum.\nLeave "
                  "out: ignore this one.\n\nFit to plant traces the selected panicle along the plant, from each "
@@ -44,6 +45,8 @@ ADD_HELP = ("Pick a tool, then click two points on the sheet: the base then the 
             "0 and 10 cm on the ruler), and every value on the sheet is recomputed.")
 DRAG_START_PX = 5        # a press on a line becomes "pull out a new point" once the mouse moves this far
 VIA_HANDLE = 4
+HISTORY_LIMIT = 100      # edits that can be undone on one sheet
+TEXT_WIDGETS = {"Entry", "TEntry", "Text", "TCombobox", "Spinbox", "TSpinbox"}
 
 
 def _hex(rgb):
@@ -207,6 +210,7 @@ class ReviewTab(ttk.Frame):
         self.selected, self.dirty, self.mode, self.mode_points = None, False, None, []
         self.hand, self.hand_name, self.manual, self.read_error = {}, "", False, ""
         self.sam = None                                         # SAM 2, loaded the first time it is asked for
+        self.undo_stack, self.redo_stack, self._drag_pushed = [], [], False   # whole-sheet snapshots, see _push_undo
         self.columnconfigure(1, weight=1)
         self.rowconfigure(0, weight=1)
 
@@ -251,6 +255,10 @@ class ReviewTab(ttk.Frame):
         top = self.winfo_toplevel()
         top.bind("<Escape>", self._escape, add="+")             # works whichever button has the focus
         top.bind("<Button-1>", self._click_elsewhere, add="+")
+        for sequence in ("<Command-z>", "<Control-z>"):
+            top.bind(sequence, lambda event: self._shortcut(event, self._undo), add="+")
+        for sequence in ("<Command-Z>", "<Control-Z>", "<Control-y>", "<Command-y>"):
+            top.bind(sequence, lambda event: self._shortcut(event, self._redo), add="+")
 
         # ---- right: the measurements on this sheet
         right = ttk.Frame(self)
@@ -329,8 +337,15 @@ class ReviewTab(ttk.Frame):
             "Previous sheet in the list").pack(side="left", padx=(6, 0))
         tip(ttk.Button(bottom, text="▶", width=3, command=lambda: self._step(1)),
             "Next sheet in the list, without accepting this one").pack(side="left", padx=(2, 6))
-        tip(ttk.Button(bottom, text="Undo edits", command=self._reload_sheet),
-            "Drop every change made to this sheet since it was opened or accepted").pack(side="left")
+        self.undo_button = tip(ttk.Button(bottom, text="↶ Undo", command=self._undo),
+                               "Undo the last edit to this sheet (Ctrl/Cmd+Z)")
+        self.undo_button.pack(side="left")
+        self.redo_button = tip(ttk.Button(bottom, text="↷ Redo", command=self._redo),
+                               "Put back the edit that was just undone (Ctrl/Cmd+Shift+Z or Ctrl+Y)")
+        self.redo_button.pack(side="left", padx=(2, 0))
+        tip(ttk.Button(bottom, text="Revert sheet", command=self._reload_sheet),
+            "Drop every change made to this sheet since it was opened or accepted (Undo brings them back)").pack(
+            side="left", padx=(6, 0))
         more = menu_button(bottom, "Labels and training", [
             ("Export labels (reviewed sheets)…", lambda: self._export_coco(True)),
             ("Export pre-labels (everything found)…", lambda: self._export_coco(False)),
@@ -346,6 +361,7 @@ class ReviewTab(ttk.Frame):
                                                                                                     padx=(6, 0))
         self.status = ttk.Label(bottom, style="Muted.TLabel")
         self.status.pack(side="left", padx=10)
+        self._history_buttons()
 
     # ------------------------------------------------------------------ the queue
 
@@ -460,6 +476,7 @@ class ReviewTab(ttk.Frame):
         csv_path, _ = self._paths()
         record = load_result(csv_path.parent / RESPONSES_DIR_NAME, gbif_id)
         self.gbif_id, self.selected, self.dirty, self.cache = gbif_id, None, False, {}
+        self._clear_history()
         self._set_mode(None)
         try:
             self.app.root.configure(cursor="watch")
@@ -488,10 +505,63 @@ class ReviewTab(ttk.Frame):
 
     def _reload_sheet(self):
         if self.gbif_id and self.result is not None:
+            self._push_undo()
             self.result, self.dirty, self.selected, self.cache = copy.deepcopy(self.saved), False, None, {}
             self._set_mode(None)
             self._refresh_panel()
             self.view.redraw()
+
+    # ------------------------------------------------------------------ undo and redo
+
+    def _push_undo(self):
+        """Remember the sheet as it is now, just before an edit changes it. Each edit (a drag, a new line, a
+        deleted point...) is one step; making a new edit forgets what was undone."""
+        if self.result is None:
+            return
+        self.undo_stack.append(copy.deepcopy(self.result))
+        del self.undo_stack[:-HISTORY_LIMIT]
+        self.redo_stack.clear()
+        self._history_buttons()
+
+    def _clear_history(self):
+        self.undo_stack, self.redo_stack, self._drag_pushed = [], [], False
+        if hasattr(self, "undo_button"):
+            self._history_buttons()
+
+    def _history_buttons(self):
+        for button, stack in ((self.undo_button, self.undo_stack), (self.redo_button, self.redo_stack)):
+            button.state(["!disabled"] if stack else ["disabled"])
+
+    def _shortcut(self, event, action):
+        """Ctrl/Cmd+Z and Redo, only while this tab is showing and no text box has the keys."""
+        if not self.winfo_ismapped() or event.widget.winfo_class() in TEXT_WIDGETS:
+            return None
+        action()
+        return "break"
+
+    def _undo(self):
+        if self.undo_stack and self.result is not None and not self.view.drag:
+            self.redo_stack.append(copy.deepcopy(self.result))
+            self._restore(self.undo_stack.pop(), "Undone.")
+
+    def _redo(self):
+        if self.redo_stack and self.result is not None and not self.view.drag:
+            self.undo_stack.append(copy.deepcopy(self.result))
+            self._restore(self.redo_stack.pop(), "Redone.")
+
+    def _restore(self, snapshot, message):
+        self.result, self.cache, self._drag_pushed = snapshot, {}, False
+        try:
+            self.dirty = bool(self.result != self.saved)
+        except (TypeError, ValueError):
+            self.dirty = True
+        if self.selected and not self._entry(self.selected):
+            self.selected = None
+        self.mode_points, self.view.pending = [], None
+        self._history_buttons()
+        self._refresh_panel()
+        self.view.redraw()
+        self.status.configure(text=message)
 
     def _entries(self):
         return [entry for trait in TRAITS for entry in self.result["traits"][trait]] if self.result else []
@@ -624,12 +694,17 @@ class ReviewTab(ttk.Frame):
             index = int(name[3:])
             if index >= len(entry.get("via") or []):
                 return
+        if not self._drag_pushed:                       # one undo step for the whole drag
+            self._push_undo()
+            self._drag_pushed = True
+        if name.startswith("via"):
             entry["via"][index] = spot
         else:
             entry["anchors"][name] = spot
         entry["points"] = self._chain(entry)
         entry["polygon"], entry["edited"], entry["reviewed"] = None, True, True
         if final:
+            self._drag_pushed = False
             self._measure_again()
         else:
             self.view.redraw()
@@ -647,6 +722,9 @@ class ReviewTab(ttk.Frame):
                                                                       for n in ("base", "tip")):
             return None
         index = via_position(entry, point)
+        if not self._drag_pushed:                        # pulling out a point continues as a drag: one undo step
+            self._push_undo()
+            self._drag_pushed = not measure
         entry.setdefault("via", []).insert(index, [round(point[0], 1), round(point[1], 1)])
         entry["points"] = self._chain(entry)
         entry["polygon"], entry["edited"], entry["reviewed"] = None, True, True
@@ -658,6 +736,7 @@ class ReviewTab(ttk.Frame):
         entry = self._entry(entry_id)
         index = int(name[3:])
         if entry and index < len(entry.get("via") or []):
+            self._push_undo()
             entry["via"].pop(index)
             entry["points"] = self._chain(entry)
             entry["polygon"], entry["edited"], entry["reviewed"] = None, True, True
@@ -667,6 +746,7 @@ class ReviewTab(ttk.Frame):
         entry = self._entry(self.selected) if self.selected else None
         if not entry:
             return
+        self._push_undo()
         entry["attrs"] = {key: var.get() for key, var in self.attr_vars.items() if var.get()}
         entry["reviewed"] = True
         self._measure_again()
@@ -684,6 +764,7 @@ class ReviewTab(ttk.Frame):
         if not entry:
             return
         before = entry.get("value_cm")
+        self._push_undo()
         entry["fit"], entry["edited"], entry["reviewed"] = fit, True, True
         self._measure_again()
         entry = self._entry(entry["id"]) or entry
@@ -710,11 +791,11 @@ class ReviewTab(ttk.Frame):
         if self.sam is not None:
             return self.sam
         if not trained.available():
-            messagebox.showinfo("SAM 2", "The model add-on is not installed. Install it in Model setup first.",
+            messagebox.showinfo("SAM 2", "The model add-on is not installed. Install it in Settings > Model add-ons first.",
                                 parent=self.app.root)
             return None
         if trained.sam_weights() is None:
-            messagebox.showinfo("SAM 2", "The SAM 2 weights are not downloaded yet. Download them in Model setup "
+            messagebox.showinfo("SAM 2", "The SAM 2 weights are not downloaded yet. Download them in Settings > Model add-ons "
                                 "(about 160 MB), then try again.", parent=self.app.root)
             return None
         try:
@@ -752,6 +833,7 @@ class ReviewTab(ttk.Frame):
         if not polygon:
             self.status.configure(text=f"No new outline: {note}.")
             return
+        self._push_undo()
         entry["polygon"], entry["reviewed"] = polygon, True
         if entry["trait"] == "panicle_length" and entry.get("fit", True):
             entry["edited"] = True                      # trace the route again, now inside the outline
@@ -775,6 +857,7 @@ class ReviewTab(ttk.Frame):
         entry = self._entry(self.selected) if self.selected else None
         if not entry:
             return
+        self._push_undo()
         self.result["traits"][entry["trait"]].remove(entry)
         self.selected = None
         self._measure_again()
@@ -834,11 +917,12 @@ class ReviewTab(ttk.Frame):
                                            parent=self.app.root)
             if length:
                 try:
-                    self.result["calibration"] = manual_calibration(self.result.get("calibration"), first, second,
-                                                                    length).as_dict()
+                    calibration = manual_calibration(self.result.get("calibration"), first, second, length).as_dict()
                 except ValueError as exc:
                     messagebox.showwarning("Set scale", str(exc), parent=self.app.root)
                     return
+                self._push_undo()
+                self.result["calibration"] = calibration
                 self.cache = {}
                 self._measure_again()
             return
@@ -850,6 +934,7 @@ class ReviewTab(ttk.Frame):
         entry.update(anchors={names[0]: first, names[1]: second}, points=[first, second], edited=True, reviewed=True)
         if mode == "panicle_length":
             entry["fit"] = False                            # straight until "Fit to plant"
+        self._push_undo()
         entries.append(entry)
         self.selected = entry["id"]
         self._measure_again()                                   # redraws, with the tool still on
@@ -882,6 +967,7 @@ class ReviewTab(ttk.Frame):
         self.app.csv_source.forget(csv_path)
         self.rows[self.gbif_id] = row
         self.dirty, self.saved = False, copy.deepcopy(self.result)
+        self._clear_history()
         position = self.items.index(self.gbif_id) if self.gbif_id in self.items else 0
         accepted = self.gbif_id
         self._fill_queue()
@@ -945,7 +1031,7 @@ class ReviewTab(ttk.Frame):
             return
         if not trained.available():
             if messagebox.askyesno("Model add-on needed", "Training needs the optional PyTorch add-on, which is not "
-                                   "installed. Open Model setup to install it?", parent=self.app.root):
+                                   "installed. Open Settings > Model add-ons to install it?", parent=self.app.root):
                 self.app.open_model_setup()
             return
         labelled = training.gather_labels()
@@ -957,10 +1043,12 @@ class ReviewTab(ttk.Frame):
 
         def work():
             for task in tasks:
-                training.train(task, labelled, epochs=epochs, imgsz=imgsz, log=self.app._log)
+                if training.train(task, labelled, epochs=epochs, imgsz=imgsz, log=self.app._log,
+                                  progress=self.app._progress, cancel=lambda: self.app.control.cancelled) is None:
+                    return "Cancelled"
             return "Training complete"
 
-        self.app._start(self.status, "Training…", work)
+        self.app._start(self.status, "Training…", work, cancellable=True)
 
 
 class TrainDialog(tk.Toplevel):
@@ -986,7 +1074,7 @@ class TrainDialog(tk.Toplevel):
         tip(ttk.Checkbutton(self, text="Outline model", variable=self.seg),
             "Finds the outlines (a segmentation model). It needs labels that have outlines, from SAM 2 or "
             "CVAT.").grid(row=2, column=0, columnspan=2, sticky="w")
-        saved = training.saved_settings()          # File > ML settings
+        saved = training.saved_settings()          # Settings > Training
         self.epochs = tk.StringVar(value=str(saved["epochs"]))
         self.imgsz = tk.StringVar(value=str(saved["imgsz"]))
         for row, (text, var, hint) in enumerate((

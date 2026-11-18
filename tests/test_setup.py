@@ -1,4 +1,4 @@
-"""Tests for measuring untouched sheets by hand, the label reader, Model setup and the downloader.
+"""Tests for measuring untouched sheets by hand, the label reader, Settings > Model add-ons and the downloader.
 
 Run with:  python -m unittest discover tests
 """
@@ -352,7 +352,16 @@ class Downloader(unittest.TestCase):
 
     def test_cancel_keeps_the_partial_file_and_the_next_try_resumes(self):
         cancel = threading.Event()
-        threading.Timer(0.3, cancel.set).start()
+        part = self.folder / "slow.bin.part"
+
+        def cancel_once_started():              # after the first bytes, however busy the computer is
+            for _ in range(500):
+                if part.is_file() and part.stat().st_size:
+                    break
+                cancel.wait(0.02)
+            cancel.set()
+
+        threading.Thread(target=cancel_once_started, daemon=True).start()
         with self.assertRaises(downloads.Cancelled):
             downloads.fetch(f"{self.base}/slow", self.folder / "slow.bin", lambda _: None, cancel)
         self.assertFalse((self.folder / "slow.bin").exists())              # never looks finished

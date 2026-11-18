@@ -1,6 +1,6 @@
 """Downloading model files and installing packages, with progress, retries, resume and Cancel.
 
-Used by the Model setup window and the command line. Nothing here runs on its own: a download or an
+Used by Settings > Model add-ons and the command line. Nothing here runs on its own: a download or an
 install starts only when a person asks for it. Both can be cancelled with a threading.Event.
 """
 import subprocess

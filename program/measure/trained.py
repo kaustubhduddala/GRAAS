@@ -27,6 +27,13 @@ REGISTRY_FILE = MODELS_DIR / "registry.json"
 CLASSES = ["panicle", "leaf", "seed", "label", "ruler", "envelope", "color_chart"]
 POSE_CLASSES = ["panicle", "leaf", "seed"]
 KEYPOINT_NAMES = {"panicle": ("base", "tip"), "leaf": ("a", "b"), "seed": ("base", "tip")}
+# Where each class keeps its two landmarks among the pose model's four keypoints. A base and a tip stay what they
+# are when the image is mirrored; a leaf's two margins trade places (the left one becomes the right one). One
+# keypoint pair cannot do both, so the leaf has its own pair and FLIP_IDX swaps only that one.
+KEYPOINT_SLOTS = {"panicle": (0, 1), "seed": (0, 1), "leaf": (2, 3)}
+POSE_KEYPOINTS = 4
+FLIP_IDX = [0, 1, 3, 2]
+SEED_PX_PER_CM = 80.0           # seed tiles are resampled to this scale for training and finding seeds
 OCCLUDER_CLASSES = ("label", "envelope", "color_chart")
 SAM_WEIGHTS = "sam2.1_b.pt"
 BASE_WEIGHTS = {"seg": "yolo11m-seg.pt", "pose": "yolo11m-pose.pt"}
@@ -177,7 +184,7 @@ def status():
     lines = ["Model add-on (PyTorch, Ultralytics): " + ("installed" if available() else "not installed")]
     if available():
         lines.append("SAM 2 outlines: " + ("ready" if sam_weights() else
-                                           "weights not downloaded yet (Model setup, or python main.py models download-sam)"))
+                                           "weights not downloaded yet (Settings > Model add-ons, or python main.py models download-sam)"))
     registry = load_registry()
     for task, what in (("pose", "Landmark model"), ("seg", "Outline model")):
         path, version = current(task)
@@ -224,8 +231,20 @@ def tiles(region, size=TILE, overlap=TILE_OVERLAP):
     return [[x, y, min(x + size, x1), min(y + size, y1)] for y in ys for x in xs]
 
 
-def _objects(result, offset=(0, 0), keypoint_names=None):
-    """Plain dicts from one ultralytics result, shifted by a crop offset into sheet coordinates."""
+def seed_scale(px_per_cm, target=SEED_PX_PER_CM):
+    """The resize factor that brings a sheet to `target` px/cm for seeds (1 when the scale is unknown).
+
+    Sheets arrive at anything from 30 to 200 px/cm, so a spikelet is 15 px on one and 90 px on the next. At one
+    scale the model sees seeds of one size, in training and when finding them."""
+    if not px_per_cm or not target:
+        return 1.0
+    return min(max(target / float(px_per_cm), 0.25), 2.0)
+
+
+def _objects(result, offset=(0, 0), keypoint_names=None, scale=1.0):
+    """Plain dicts from one ultralytics result, shifted by a crop offset into sheet coordinates.
+
+    `scale` is the factor the crop was resized by before the model saw it; positions are divided by it."""
     found = []
     if result.boxes is None:
         return found
@@ -236,17 +255,23 @@ def _objects(result, offset=(0, 0), keypoint_names=None):
     polygons = result.masks.xy if getattr(result, "masks", None) is not None else None
     points = result.keypoints.xy.cpu().numpy() if getattr(result, "keypoints", None) is not None else None
     ox, oy = offset
+
+    def at(x, y):
+        return [round(float(x / scale + ox), 1), round(float(y / scale + oy), 1)]
+
     for i, box in enumerate(boxes):
         cls = names[int(classes[i])]
-        obj = {"cls": cls, "box": [float(box[0] + ox), float(box[1] + oy), float(box[2] + ox), float(box[3] + oy)],
+        obj = {"cls": cls, "box": at(box[0], box[1]) + at(box[2], box[3]),
                "score": float(scores[i]), "polygon": None, "keypoints": None, "source": "trained"}
         if polygons is not None and i < len(polygons) and len(polygons[i]) >= 3:
-            obj["polygon"] = [[round(float(x + ox), 1), round(float(y + oy), 1)] for x, y in polygons[i]]
+            obj["polygon"] = [at(x, y) for x, y in polygons[i]]
         if points is not None and i < len(points):
             pair = (keypoint_names or KEYPOINT_NAMES).get(cls)
-            if pair and len(points[i]) >= 2:
-                obj["keypoints"] = {name: [round(float(points[i][k][0] + ox), 1), round(float(points[i][k][1] + oy), 1)]
-                                    for k, name in enumerate(pair)}
+            # four keypoints: each class in its own slots; two (models trained before the leaf had its own pair):
+            # the first two
+            slots = KEYPOINT_SLOTS.get(cls, (0, 1)) if len(points[i]) >= POSE_KEYPOINTS else (0, 1)
+            if pair and len(points[i]) > max(slots):
+                obj["keypoints"] = {name: at(*points[i][k][:2]) for name, k in zip(pair, slots)}
         found.append(obj)
     return found
 
@@ -257,6 +282,9 @@ class TrainedModels:
     def __init__(self, log=print):
         self.log = log
         self.paths = {task: current(task) for task in ("seg", "pose")}
+        registry = load_registry()
+        # the scale each model was shown seed tiles at (None: native resolution, as before seed tiles were resampled)
+        self.seed_px_per_cm = {task: (registry.get(task) or {}).get("seed_px_per_cm") for task in self.paths}
         self.models = {}
         self._cache = (None, None)
         self.ready = available() and any(path for path, _ in self.paths.values())
@@ -275,10 +303,10 @@ class TrainedModels:
             self.models[task] = YOLO(str(self.paths[task][0]))
         return self.models[task]
 
-    def _predict(self, task, rgb, offset=(0, 0), imgsz=SHEET_IMGSZ):
+    def _predict(self, task, rgb, offset=(0, 0), imgsz=SHEET_IMGSZ, scale=1.0):
         results = self._model(task).predict(source=_bgr(rgb), imgsz=imgsz, conf=MIN_SCORE, device=device(),
                                             verbose=False)
-        return _objects(results[0], offset)
+        return _objects(results[0], offset, scale=scale)
 
     def sheet(self, rgb):
         """Every object found on the whole sheet (cached for the sheet being measured).
@@ -304,23 +332,36 @@ class TrainedModels:
         self._cache = (rgb, objects)
         return objects
 
-    def seeds(self, rgb, regions):
-        """Seeds found by tiled inference at native resolution inside `regions` (the panicle boxes).
+    def seeds(self, rgb, regions, px_per_cm=None):
+        """Seeds found by tiled inference inside `regions` (the panicle boxes).
 
         Seeds are a few dozen pixels long on a sheet of thousands; on the downsized sheet they vanish,
-        so the models look at full-resolution tiles instead.
+        so the models look at tiles instead: at the scale the model was trained at (SEED_PX_PER_CM, from
+        `px_per_cm`), or at full resolution for a model trained before tiles were resampled.
         """
+        import cv2
+
         h, w = rgb.shape[:2]
         found = []
         for region in regions:
-            clipped = [max(0, region[0]), max(0, region[1]), min(w, region[2]), min(h, region[3])]
-            for x0, y0, x1, y1 in tiles(clipped):
-                tile = rgb[y0:y1, x0:x1]
-                if tile.shape[0] < 32 or tile.shape[1] < 32:
+            x0, y0 = int(max(0, region[0])), int(max(0, region[1]))
+            x1, y1 = int(min(w, region[2])), int(min(h, region[3]))
+            if x1 - x0 < 32 or y1 - y0 < 32:
+                continue
+            for task in ("pose", "seg"):
+                if not self.has(task):
                     continue
-                for task in ("pose", "seg"):
-                    if self.has(task):
-                        found += [o for o in self._predict(task, tile, (x0, y0), imgsz=TILE) if o["cls"] == "seed"]
+                factor = seed_scale(px_per_cm, self.seed_px_per_cm.get(task))
+                crop = rgb[y0:y1, x0:x1]
+                if factor != 1.0:
+                    crop = cv2.resize(crop, (max(1, round(crop.shape[1] * factor)), max(1, round(crop.shape[0] * factor))),
+                                      interpolation=cv2.INTER_AREA if factor < 1 else cv2.INTER_CUBIC)
+                for tx0, ty0, tx1, ty1 in tiles([0, 0, crop.shape[1], crop.shape[0]]):
+                    tile = crop[ty0:ty1, tx0:tx1]
+                    if tile.shape[0] < 32 or tile.shape[1] < 32:
+                        continue
+                    shift = (x0 + tx0 / factor, y0 + ty0 / factor)
+                    found += [o for o in self._predict(task, tile, shift, imgsz=TILE, scale=factor) if o["cls"] == "seed"]
         merged = []
         for obj in suppress(found):                      # join a seed's landmarks to its outline
             twin = next((m for m in merged if _iou(m["box"], obj["box"]) >= 0.3), None)

@@ -174,7 +174,7 @@ class Detector:
                 box = entry.get("box") or _box_around(points, 0, image.size)
                 margin = CROP_MARGIN * max(box[2] - box[0], box[3] - box[1], px_per_cm)
                 regions.append(_box_around([box[:2], box[2:]], margin, image.size))
-            found = sorted(self.models.seeds(rgb, regions), key=lambda o: -o["score"])[:12]
+            found = sorted(self.models.seeds(rgb, regions, px_per_cm), key=lambda o: -o["score"])[:12]
             return found, {"source": "trained", "found": len(found), "regions": regions}
         best = max(panicles, key=lambda e: e.get("quality", 0))
         # Look where the spikelets are: on the traced panicle, a little above its middle. (The point
@@ -223,9 +223,9 @@ def build_detector(model_settings=None, options=None, log=print):
     if options.mode == "trained" and models is None:
         raise DetectorError("No trained model is available. " + (
             "Review some sheets and train a model first (Review tab)." if trained.available()
-            else "Install the model add-on first (File > Model setup, or python main.py models install)"))
+            else "Install the model add-on first (Settings > Model add-ons, or python main.py models install)"))
     if options.read_labels and options.label_reader == "ocr" and not ocr.available():
-        raise DetectorError("The built-in label reader is not installed. Install it in Model setup, or choose "
+        raise DetectorError("The built-in label reader is not installed. Install it in Settings > Model add-ons, or choose "
                             "the vision model for labels.")
     labels_need_vision = options.read_labels and (options.label_reader == "vision" or (
         options.label_reader == "auto" and not ocr.available()))
@@ -251,7 +251,7 @@ def build_detector(model_settings=None, options=None, log=print):
     if options.refine_masks and trained.available():
         if trained.sam_weights() is None:
             log("  SAM 2 outlines are skipped: its weights are not downloaded yet "
-                "(download it in File > Model setup, or run python main.py models download-sam, once). Using the colour-based plant mask instead.")
+                "(download it in Settings > Model add-ons, or run python main.py models download-sam, once). Using the colour-based plant mask instead.")
         else:
             try:
                 sam = trained.SamRefiner()

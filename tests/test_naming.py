@@ -18,7 +18,9 @@ class Naming(unittest.TestCase):
             self.assertFalse(re.search(r'[<>:"/\\|?*]', name), name)        # a colon is not allowed on Windows
             self.assertEqual(name, name.strip())
         self.assertEqual(build.NAME, config.APP_NAME)                        # the app, folder and keychain agree
-        self.assertIn(config.APP_NAME, config.APP_TITLE)
+        # the title spells the name out (G.R.A.A.S), and is plain text: it is shown in the window's title bar
+        self.assertIn(config.APP_NAME.upper(), config.APP_TITLE.replace(".", "").upper())
+        self.assertFalse(config.APP_TITLE.startswith(("#", " ")))
 
     def test_workflow_paths_use_the_built_name(self):
         workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text()

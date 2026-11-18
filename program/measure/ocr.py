@@ -2,7 +2,7 @@
 
 The engine is RapidOCR (Apache-2.0): the PaddleOCR text detector and recognizer converted to ONNX and
 run on the CPU. Its models are inside the package, so nothing is downloaded when it runs. It is
-optional: install it from Model setup (or `python main.py models install-ocr`).
+optional: install it from Settings > Model add-ons (or `python main.py models install-ocr`).
 
 What it does and does not do. It reads printed text well: typed labels, stamps, barcode numbers. It
 reads handwriting poorly. It returns the text of the label; the fields it can pull out of that text

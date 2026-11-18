@@ -31,19 +31,30 @@ class TaskControl:
         self.skip_event = threading.Event()
         self.skip_site = False  # the pending skip covers the whole website, not just this item
         self.skipped_hosts = set()
+        # For tasks that work on several websites at the same time (image downloads), see ItemControl:
+        self.skip_generation = 0    # goes up with every Skip, so each item in progress can tell it was skipped
+        self.skip_requests = set()  # websites to skip, asked for by name
+        self.active = {}            # website -> the item being downloaded from it now, for the Skip menu
 
     def reset(self):
         self.cancel_event.clear()
         self.skip_event.clear()
         self.skip_site = False
         self.skipped_hosts = set()
+        self.skip_requests = set()
+        self.active = {}
 
     def new_item(self):
         self.skip_event.clear()
         self.skip_site = False
 
-    def request_skip(self, site=False):
+    def request_skip(self, site=False, host=None):
+        """Skip what is in progress. With `host`, skip that one website and leave the others running."""
+        if host:
+            self.skip_requests.add(host)
+            return
         self.skip_site = site
+        self.skip_generation += 1
         self.skip_event.set()
 
     @property
@@ -52,6 +63,50 @@ class TaskControl:
 
     def check(self):
         if self.skip_event.is_set() or self.cancel_event.is_set():
+            raise ItemSkipped()
+
+    def sleep(self, seconds):
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            self.check()
+            time.sleep(min(0.25, max(end - time.monotonic(), 0)))
+
+
+class ItemControl:
+    """The task's controls as one of several lanes working side by side sees them.
+
+    TaskControl has one "skip" switch, which the next item clears; with several items in progress that would
+    skip some and miss others. Each lane therefore watches the skip counter from the moment its own item began:
+    Skip skips every item in progress once, Cancel stops all lanes, and a website named in skip_requests is
+    skipped by the lane working on it alone.
+    """
+
+    def __init__(self, parent, host):
+        self.parent, self.host = parent, host
+        self.skip_site = False
+        self.generation = parent.skip_generation
+
+    def new_item(self):
+        self.skip_site = False
+        self.generation = self.parent.skip_generation
+
+    @property
+    def cancelled(self):
+        return self.parent.cancelled
+
+    @property
+    def skipped_hosts(self):
+        return self.parent.skipped_hosts
+
+    def check(self):
+        parent = self.parent
+        if parent.cancel_event.is_set():
+            raise ItemSkipped()
+        if self.host in parent.skip_requests:
+            self.skip_site = True
+            raise ItemSkipped()
+        if parent.skip_generation != self.generation:
+            self.skip_site = parent.skip_site
             raise ItemSkipped()
 
     def sleep(self, seconds):
@@ -118,7 +173,16 @@ def read_dwca(path):
 
 
 def save_csv(df, path):
-    df.to_csv(path, index=False, quoting=csv.QUOTE_ALL, encoding="utf-8-sig")
+    """Write a CSV in one step: to a temporary file beside it, which then replaces the old file. A crash, a full
+    disk or a power cut part-way through therefore never leaves half a file where the data was (the measurements
+    and the dataset are rewritten after every sheet and every 25 images of a long run)."""
+    path = Path(path)
+    temp = path.with_name(path.name + ".tmp")
+    try:
+        df.to_csv(temp, index=False, quoting=csv.QUOTE_ALL, encoding="utf-8-sig")
+        os.replace(temp, path)
+    finally:
+        temp.unlink(missing_ok=True)
 
 
 def first_url_series(df, columns):

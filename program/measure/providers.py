@@ -44,6 +44,11 @@ class ProviderError(RuntimeError):
     """A problem reaching or authenticating with the model provider, worded for the user."""
 
 
+class ProviderUnavailable(ProviderError):
+    """The provider did not answer, is overloaded or is rate-limiting: worth waiting and trying again, unlike a
+    wrong key or model name. (The provider libraries have already retried a couple of times by themselves.)"""
+
+
 class ModelOutputError(ValueError):
     def __init__(self, message, raw):
         super().__init__(message)
@@ -404,7 +409,8 @@ class OpenAICompatibleClient:
                         f"in LM Studio.") from exc
 
     def _ask_json_once(self, images, system, text, schema=None, name="answer", control=None, status=None, stage=""):
-        from openai import APIConnectionError, AuthenticationError, BadRequestError, NotFoundError, PermissionDeniedError
+        from openai import (APIConnectionError, AuthenticationError, BadRequestError, InternalServerError,
+                            NotFoundError, PermissionDeniedError, RateLimitError)
 
         request = self._request(images, system, text, schema, name)
         while True:
@@ -429,7 +435,9 @@ class OpenAICompatibleClient:
             except NotFoundError as exc:
                 raise ProviderError(f"{self.settings.label} does not know the model {self.model_id}: {exc}") from exc
             except APIConnectionError as exc:
-                raise ProviderError(f"Could not reach {self.settings.label} at {self.settings.url}: {exc}") from exc
+                raise ProviderUnavailable(f"Could not reach {self.settings.label} at {self.settings.url}: {exc}") from exc
+            except (RateLimitError, InternalServerError) as exc:
+                raise ProviderUnavailable(f"{self.settings.label} is busy or rate-limiting ({exc})") from exc
 
     def _stream(self, request, control, status, stage):
         content, reasoning = [], []
@@ -628,7 +636,9 @@ class ClaudeClient:
             except anthropic.NotFoundError as exc:
                 raise ProviderError(f"Anthropic does not know the model {self.model_id}: {exc}") from exc
             except anthropic.APIConnectionError as exc:
-                raise ProviderError(f"Could not reach Anthropic: {exc}") from exc
+                raise ProviderUnavailable(f"Could not reach Anthropic: {exc}") from exc
+            except (anthropic.RateLimitError, anthropic.InternalServerError) as exc:
+                raise ProviderUnavailable(f"Anthropic is busy or rate-limiting ({exc})") from exc
 
     def _stream(self, params, control, status, stage):
         events, reported = 0, 0
